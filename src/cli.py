@@ -139,17 +139,9 @@ def cmd_list_streamers(args: argparse.Namespace) -> None:
 
 
 def cmd_upload(args: argparse.Namespace) -> None:
-    """Upload a video to YouTube."""
-    from src.services.youtube_upload import upload_video
-
+    """Upload a video to one or more platforms (YouTube, Instagram, or both)."""
     env = load_env(args.env)
     data_dir = _get_data_dir(args)
-    client_id = env.get("YOUTUBE_CLIENT_ID") or os.getenv("YOUTUBE_CLIENT_ID", "")
-    client_secret = env.get("YOUTUBE_CLIENT_SECRET") or os.getenv("YOUTUBE_CLIENT_SECRET", "")
-
-    if not client_id or not client_secret:
-        console.print("[red]YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET must be set in .env[/]")
-        return
 
     # Determine file path
     file_path = args.file
@@ -167,7 +159,7 @@ def cmd_upload(args: argparse.Namespace) -> None:
         console.print(f"[red]File not found: {file_path or '(none)'}[/]")
         return
 
-    # Load upload config
+    # Load upload config for defaults
     config_path = os.path.join(Path(args.config).resolve(), "youtube_upload.json")
     upload_config = {}
     if os.path.exists(config_path):
@@ -190,6 +182,64 @@ def cmd_upload(args: argparse.Namespace) -> None:
         tags = upload_config.get("default_tags", [])
     privacy = args.privacy or upload_config.get("default_privacy", "private")
 
+    # Determine which platforms to upload to
+    platforms = []
+    if args.platform in ("youtube", "all"):
+        platforms.append("youtube")
+    if args.platform in ("instagram", "all"):
+        platforms.append("instagram")
+
+    results: dict[str, object] = {}
+
+    if "youtube" in platforms:
+        results["youtube"] = _upload_to_youtube(
+            file_path=file_path,
+            title=title,
+            description=description,
+            tags=tags,
+            privacy=privacy,
+            env=env,
+            data_dir=data_dir,
+        )
+
+    if "instagram" in platforms:
+        results["instagram"] = _upload_to_instagram(
+            file_path=file_path,
+            caption=description or title,
+            env=env,
+            data_dir=data_dir,
+        )
+
+    # Summary
+    success_count = sum(1 for r in results.values() if r is not None)
+    total = len(results)
+    if success_count == total:
+        console.print(f"[bold green]All {total} upload(s) completed successfully[/]")
+    elif success_count > 0:
+        console.print(f"[bold yellow]{success_count}/{total} upload(s) completed[/]")
+    else:
+        console.print("[bold red]All uploads failed[/]")
+
+
+def _upload_to_youtube(
+    file_path: str,
+    title: str,
+    description: str,
+    tags: list[str],
+    privacy: str,
+    env: dict[str, str],
+    data_dir: str,
+) -> object:
+    """Upload a video to YouTube.  Returns result dict or None on failure."""
+    from src.services.youtube_upload import upload_video
+
+    client_id = env.get("YOUTUBE_CLIENT_ID") or os.getenv("YOUTUBE_CLIENT_ID", "")
+    client_secret = env.get("YOUTUBE_CLIENT_SECRET") or os.getenv("YOUTUBE_CLIENT_SECRET", "")
+
+    if not client_id or not client_secret:
+        console.print("[red]YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET must be set in .env[/]")
+        return None
+
     console.print("[bold]Uploading to YouTube...[/]")
     console.print(f"  File: {file_path}")
     console.print(f"  Title: {title}")
@@ -198,7 +248,7 @@ def cmd_upload(args: argparse.Namespace) -> None:
         console.print(f"  Tags: {', '.join(tags)}")
     console.print()
 
-    with console.status("[yellow]Uploading...[/]"):
+    with console.status("[yellow]Uploading to YouTube...[/]"):
         result = upload_video(
             file_path=file_path,
             title=title,
@@ -211,11 +261,61 @@ def cmd_upload(args: argparse.Namespace) -> None:
         )
 
     if result:
-        console.print(f"[green]Upload complete![/]")
+        console.print(f"[green]YouTube upload complete![/]")
         console.print(f"  Video ID: {result['video_id']}")
         console.print(f"  URL: {result['url']}")
     else:
-        console.print("[red]Upload failed[/]")
+        console.print("[red]YouTube upload failed[/]")
+
+    return result
+
+
+def _upload_to_instagram(
+    file_path: str,
+    caption: str,
+    env: dict[str, str],
+    data_dir: str,
+) -> object:
+    """Upload a video to Instagram.  Returns media ID string or None on failure."""
+    from src.services.instagram_upload import InstagramAuth, InstagramPublisher
+
+    app_id = env.get("INSTAGRAM_APP_ID") or os.getenv("INSTAGRAM_APP_ID", "")
+    app_secret = env.get("INSTAGRAM_APP_SECRET") or os.getenv("INSTAGRAM_APP_SECRET", "")
+
+    if not app_id or not app_secret:
+        console.print("[red]INSTAGRAM_APP_ID and INSTAGRAM_APP_SECRET must be set in .env[/]")
+        return None
+
+    auth = InstagramAuth(
+        app_id=app_id,
+        app_secret=app_secret,
+        data_dir=data_dir,
+    )
+
+    if not auth.is_authenticated():
+        console.print("[red]Instagram not authenticated. Run 'sma auth instagram' first.[/]")
+        return None
+
+    console.print("[bold]Uploading to Instagram...[/]")
+    console.print(f"  File: {file_path}")
+    console.print(f"  Caption: {caption}")
+    console.print()
+
+    publisher = InstagramPublisher(auth)
+
+    with console.status("[yellow]Uploading to Instagram...[/]"):
+        media_id = publisher.publish(
+            video_path=file_path,
+            caption=caption,
+        )
+
+    if media_id:
+        console.print(f"[green]Instagram upload complete![/]")
+        console.print(f"  Media ID: {media_id}")
+    else:
+        console.print("[red]Instagram upload failed[/]")
+
+    return media_id
 
 
 def cmd_auth_login(args: argparse.Namespace) -> None:
@@ -754,13 +854,14 @@ def main() -> None:
     schedule_parser.add_argument("--interval", type=int, default=60, help="Interval in minutes between runs (default: 60)")
     schedule_parser.add_argument("--dry-run", action="store_true", help="Process without actual publishing")
 
-    upload_parser = sub.add_parser("upload", help="Upload a video to YouTube")
+    upload_parser = sub.add_parser("upload", help="Upload a video to YouTube and/or Instagram")
     upload_parser.add_argument("file", nargs="?", help="Path to video file")
     upload_parser.add_argument("--title", help="Video title (auto-generated from filename if omitted)")
     upload_parser.add_argument("--description", help="Video description")
     upload_parser.add_argument("--tags", help="Comma-separated tags")
     upload_parser.add_argument("--privacy", choices=["private", "unlisted", "public"], default="private", help="Privacy status (default: private)")
     upload_parser.add_argument("--latest", action="store_true", help="Use most recent file from data/enhanced/")
+    upload_parser.add_argument("--platform", choices=["youtube", "instagram", "all"], default="youtube", help="Target platform(s) for upload (default: youtube)")
 
     args = parser.parse_args()
 
