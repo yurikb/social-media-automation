@@ -2,6 +2,8 @@ import argparse
 import json
 import os
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 
 from rich.console import Console
@@ -329,6 +331,39 @@ def cmd_health(args: argparse.Namespace) -> None:
     sys.exit(report.exit_code)
 
 
+def cmd_schedule(args: argparse.Namespace) -> None:
+    """Run the pipeline on a schedule at the specified interval."""
+    import schedule as schedule_lib
+
+    interval = args.interval
+    pipeline = _create_pipeline(args)
+    console.print(
+        f"[bold cyan]SMA Schedule Mode[/] — running every {interval} minute(s). "
+        f"Press Ctrl+C to stop."
+    )
+
+    def _run_job() -> None:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        console.print(f"[bold green][{ts}] Starting pipeline run...[/]")
+        try:
+            results = pipeline.run_cycle(dry_run=args.dry_run)
+            console.print(f"[green][{ts}] Completed: {len(results)} videos processed[/]")
+        except Exception as e:
+            console.print(f"[red][{ts}] Pipeline error: {e}[/]")
+
+    schedule_lib.every(interval).minutes.do(_run_job)
+
+    # Run immediately on start
+    _run_job()
+
+    try:
+        while True:
+            schedule_lib.run_pending()
+            time.sleep(1)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Scheduler stopped. Goodbye![/]")
+
+
 def _create_twitch_auth(args: argparse.Namespace) -> TwitchAuth | None:
     env = load_env(args.env)
     client_id = env.get("TWITCH_CLIENT_ID") or os.getenv("TWITCH_CLIENT_ID", "")
@@ -635,6 +670,10 @@ def main() -> None:
     health_parser = sub.add_parser("health", help="Run health checks")
     health_parser.add_argument("--json", action="store_true", help="Output machine-readable JSON")
 
+    schedule_parser = sub.add_parser("schedule", help="Run the pipeline on a schedule")
+    schedule_parser.add_argument("--interval", type=int, default=60, help="Interval in minutes between runs (default: 60)")
+    schedule_parser.add_argument("--dry-run", action="store_true", help="Process without actual publishing")
+
     args = parser.parse_args()
 
     if args.command == "auth":
@@ -673,6 +712,8 @@ def main() -> None:
         cmd_list_streamers(args)
     elif args.command == "health":
         cmd_health(args)
+    elif args.command == "schedule":
+        cmd_schedule(args)
     else:
         parser.print_help()
 
