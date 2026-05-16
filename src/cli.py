@@ -12,6 +12,7 @@ from src.services.pipeline import Pipeline
 from src.services.review import ReviewService
 from src.models.clip_candidate import ClipCandidate, StreamInfo, ViralScore
 from src.services.twitch_auth import TwitchAuth
+from src.services.health import run_health_check
 
 console = Console()
 
@@ -280,6 +281,52 @@ def cmd_auth_test(args: argparse.Namespace) -> None:
                 console.print("[red]  Failed to create clip[/]")
         except Exception as e:
             console.print(f"[red]  Error: {e}[/]")
+
+
+def cmd_health(args: argparse.Namespace) -> None:
+    """Run health checks and report status."""
+    data_dir = _get_data_dir(args)
+    config_dir = str(Path(args.config).resolve())
+    env_path = args.env
+
+    report = run_health_check(
+        config_dir=config_dir,
+        data_dir=data_dir,
+        env_path=env_path,
+    )
+
+    if getattr(args, "json", False):
+        console.print_json(data=report.to_dict())
+    else:
+        # Rich table output
+        table = Table(title="SMA Health Check")
+        table.add_column("Check", style="cyan")
+        table.add_column("Status", justify="center")
+        table.add_column("Message")
+
+        status_styles = {"ok": "green", "warn": "yellow", "error": "red"}
+        status_icons = {"ok": "✓", "warn": "⚠", "error": "✗"}
+
+        for check in report.checks:
+            style = status_styles.get(check.status, "white")
+            icon = status_icons.get(check.status, "?")
+            table.add_row(
+                check.name,
+                f"[{style}]{icon} {check.status}[/]",
+                check.message,
+            )
+
+        console.print(table)
+        console.print()
+
+        if report.overall == "ok":
+            console.print("[bold green]All checks passed — SMA is healthy[/]")
+        elif report.overall == "warn":
+            console.print("[bold yellow]Some checks have warnings — review above[/]")
+        else:
+            console.print("[bold red]Some checks failed — SMA may not work correctly[/]")
+
+    sys.exit(report.exit_code)
 
 
 def _create_twitch_auth(args: argparse.Namespace) -> TwitchAuth | None:
@@ -585,6 +632,9 @@ def main() -> None:
     auth_sub.add_parser("youtube", help="Authorize YouTube uploads (opens browser)")
     auth_sub.add_parser("instagram", help="Authorize Instagram uploads (opens browser)")
 
+    health_parser = sub.add_parser("health", help="Run health checks")
+    health_parser.add_argument("--json", action="store_true", help="Output machine-readable JSON")
+
     args = parser.parse_args()
 
     if args.command == "auth":
@@ -621,6 +671,8 @@ def main() -> None:
         cmd_reject(args)
     elif args.command == "list-streamers":
         cmd_list_streamers(args)
+    elif args.command == "health":
+        cmd_health(args)
     else:
         parser.print_help()
 
