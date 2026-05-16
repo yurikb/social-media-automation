@@ -1,236 +1,276 @@
+"""
+YouTube Data API v3 upload service.
+
+Simple public interface::
+
+    result = upload_video("video.mp4", "My Title", tags=["gaming"])
+    if result:
+        print(result["video_id"], result["url"])
+
+Uses OAuth2 token from ``data/youtube_token.json`` (auto-refreshed).
+"""
+
+from __future__ import annotations
+
 import json
+import os
 import time
-import webbrowser
-from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from threading import Event, Thread
-from typing import Optional
-from urllib.parse import urlparse, parse_qs
+from typing import Any, Optional
 
 import httpx
 
-REDIRECT_PORT = 3011
-REDIRECT_URI = f"http://localhost:{REDIRECT_PORT}"
+# ---------------------------------------------------------------------------
+# Path discovery
+# ---------------------------------------------------------------------------
+
+_DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
+
+# ---------------------------------------------------------------------------
+# Token helpers
+# ---------------------------------------------------------------------------
 
 
-class _CallbackHandler(BaseHTTPRequestHandler):
-    auth_code: Optional[str] = None
-    event = Event()
+def _load_token(data_dir: str) -> Optional[dict[str, Any]]:
+    """Load the persisted token dict from *data_dir*/youtube_token.json."""
+    token_file = Path(data_dir) / "youtube_token.json"
+    if not token_file.exists():
+        return None
+    try:
+        return json.loads(token_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
 
-    def do_GET(self):
-        parsed = urlparse(self.path)
-        params = parse_qs(parsed.query)
-        code = params.get("code", [None])[0]
-        error = params.get("error", [None])[0]
-        if error:
-            self.send_response(400)
-            self.end_headers()
-            self.wfile.write(b"Auth failed.")
-            return
-        if code:
-            self.__class__.auth_code = code
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"You can close this tab.")
-            self.__class__.event.set()
-        else:
-            self.send_response(400)
-            self.end_headers()
-            self.wfile.write(b"No code.")
 
-    def log_message(self, *a, **k):
-        pass
+def _save_token(token_data: dict[str, Any], data_dir: str) -> None:
+    """Persist *token_data* to *data_dir*/youtube_token.json."""
+    token_file = Path(data_dir) / "youtube_token.json"
+    token_file.parent.mkdir(parents=True, exist_ok=True)
+    token_file.write_text(json.dumps(token_data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _get_valid_token(client_id: str, client_secret: str, data_dir: str) -> Optional[str]:
+    """Return a valid access token, refreshing the stored token if needed."""
+    token = _load_token(data_dir)
+    if not token:
+        return None
+
+    access_token = token.get("access_token")
+    if not access_token:
+        return None
+
+    # Still fresh
+    if time.time() < token.get("expires_at", 0):
+        return access_token
+
+    # Expired — try refresh
+    refresh_token = token.get("refresh_token")
+    if not refresh_token:
+        return None
+
+    try:
+        resp = httpx.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        new_token: dict[str, Any] = {
+            "access_token": body["access_token"],
+            "refresh_token": refresh_token,
+            "expires_at": time.time() + body.get("expires_in", 3600),
+        }
+        _save_token(new_token, data_dir)
+        return body["access_token"]
+    except httpx.HTTPError:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Upload helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_multipart(metadata: dict[str, Any], video_path: str, boundary: str) -> bytes:
+    """Build a multipart/related request body (JSON metadata + binary video)."""
+    parts = [
+        f"--{boundary}\r\n".encode(),
+        b"Content-Type: application/json; charset=UTF-8\r\n\r\n",
+        json.dumps(metadata, ensure_ascii=False).encode("utf-8"),
+        b"\r\n",
+        f"--{boundary}\r\n".encode(),
+        b"Content-Type: video/*\r\n\r\n",
+        Path(video_path).read_bytes(),
+        b"\r\n",
+        f"--{boundary}--\r\n".encode(),
+    ]
+    return b"".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# YouTubeAuth  — kept for backward compatibility with cli.py
+# ---------------------------------------------------------------------------
 
 
 class YouTubeAuth:
+    """YouTube OAuth2 authentication (backward-compatible wrapper)."""
+
     SCOPES = [
         "https://www.googleapis.com/auth/youtube.upload",
         "https://www.googleapis.com/auth/youtube.readonly",
     ]
 
-    def __init__(self, client_id: str, client_secret: str, data_dir: str):
+    def __init__(self, client_id: str, client_secret: str, data_dir: str) -> None:
         self.client_id = client_id
         self.client_secret = client_secret
         self.token_file = Path(data_dir) / "youtube_token.json"
 
-    @property
-    def auth_url(self) -> str:
-        scope_str = "+".join(self.SCOPES)
-        return (
-            "https://accounts.google.com/o/oauth2/v2/auth"
-            f"?client_id={self.client_id}"
-            f"&redirect_uri={REDIRECT_URI}"
-            f"&response_type=code"
-            f"&scope={scope_str}"
-            f"&access_type=offline"
-            f"&prompt=consent"
-        )
-
-    def login(self) -> Optional[str]:
-        _CallbackHandler.auth_code = None
-        _CallbackHandler.event.clear()
-        server = HTTPServer(("localhost", REDIRECT_PORT), _CallbackHandler)
-        thread = Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-
-        print(f"\n[YOUTUBE AUTH] Opening browser for authorization...")
-        webbrowser.open(self.auth_url)
-        print(f"[YOUTUBE AUTH] Waiting for callback on {REDIRECT_URI}...")
-        _CallbackHandler.event.wait(timeout=120)
-        server.shutdown()
-
-        code = _CallbackHandler.auth_code
-        if not code:
-            print("[YOUTUBE AUTH] Timeout or cancelled")
-            return None
-        return self._exchange_code(code)
-
-    def _exchange_code(self, code: str) -> str:
-        resp = httpx.post(
-            "https://oauth2.googleapis.com/token",
-            data={
-                "client_id": self.client_id,
-                "client_secret": self.client_secret,
-                "code": code,
-                "grant_type": "authorization_code",
-                "redirect_uri": REDIRECT_URI,
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        token = data["access_token"]
-        refresh = data.get("refresh_token", "")
-        self._save(token, refresh, data.get("expires_in", 3600))
-        return token
-
-    def _save(self, token: str, refresh: str, expires_in: int) -> None:
-        self.token_file.parent.mkdir(parents=True, exist_ok=True)
-        self.token_file.write_text(json.dumps({
-            "access_token": token,
-            "refresh_token": refresh,
-            "expires_at": time.time() + expires_in,
-        }, indent=2))
-
     def get_token(self) -> Optional[str]:
-        if not self.token_file.exists():
-            return None
-        try:
-            data = json.loads(self.token_file.read_text())
-        except (json.JSONDecodeError, OSError):
-            return None
-        if time.time() < data.get("expires_at", 0):
-            return data["access_token"]
-        if data.get("refresh_token"):
-            return self._refresh(data["refresh_token"])
-        return None
-
-    def _refresh(self, refresh_token: str) -> Optional[str]:
-        try:
-            resp = httpx.post(
-                "https://oauth2.googleapis.com/token",
-                data={
-                    "client_id": self.client_id,
-                    "client_secret": self.client_secret,
-                    "refresh_token": refresh_token,
-                    "grant_type": "refresh_token",
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            self._save(data["access_token"], refresh_token, data.get("expires_in", 3600))
-            return data["access_token"]
-        except httpx.HTTPError:
-            return None
+        return _get_valid_token(self.client_id, self.client_secret, str(self.token_file.parent))
 
     def is_authenticated(self) -> bool:
         return self.get_token() is not None
 
-    def get_channel_info(self) -> dict:
-        token = self.get_token()
-        if not token:
-            return {}
-        resp = httpx.get(
-            "https://www.googleapis.com/youtube/v3/channels",
-            params={"part": "snippet", "mine": "true"},
-            headers={"Authorization": f"Bearer {token}"},
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def upload_video(
+    file_path: str,
+    title: str,
+    description: str = "",
+    tags: Optional[list[str]] = None,
+    privacy: str = "private",
+    **kwargs: Any,
+) -> Optional[dict[str, str]]:
+    """Upload a video to YouTube via the Data API v3.
+
+    OAuth2 credentials are read from ``data/youtube_token.json`` and
+    refreshed automatically when expired.
+
+    Parameters
+    ----------
+    file_path:
+        Absolute or relative path to the video file (e.g. ``.mp4``).
+    title:
+        Video title.
+    description:
+        Video description (optional).
+    tags:
+        List of keyword tags (optional).
+    privacy:
+        Privacy status — ``"private"`` (default), ``"unlisted"``, or
+        ``"public"``.
+
+    Returns
+    -------
+    A dict ``{"video_id": str, "url": str}`` on success, or ``None`` on
+    failure.
+
+    Extra keyword arguments (``client_id``, ``client_secret``,
+    ``data_dir``) are accepted for backward compatibility with the
+    existing CLI code.
+    """
+    # Resolve optional overrides
+    client_id = kwargs.get("client_id") or os.environ.get("YOUTUBE_CLIENT_ID", "")
+    client_secret = kwargs.get("client_secret") or os.environ.get("YOUTUBE_CLIENT_SECRET", "")
+    data_dir = kwargs.get("data_dir") or str(_DATA_DIR)
+
+    # --- Validate inputs ---------------------------------------------------
+
+    if not client_id or not client_secret:
+        msg = (
+            "[YOUTUBE] YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET must be set "
+            "in the environment or passed as extra kwargs."
         )
-        resp.raise_for_status()
+        print(msg)
+        return None
+
+    video_path = Path(file_path)
+    if not video_path.exists():
+        print(f"[YOUTUBE] File not found: {file_path}")
+        return None
+
+    # --- Obtain a valid token ----------------------------------------------
+
+    token = _get_valid_token(client_id, client_secret, data_dir)
+    if not token:
+        print("[YOUTUBE] Not authenticated — token missing or expired.")
+        return None
+
+    # --- Build request -----------------------------------------------------
+
+    metadata: dict[str, Any] = {
+        "snippet": {
+            "title": title,
+            "description": description or "",
+            "tags": tags or [],
+            "categoryId": "22",  # Gaming
+        },
+        "status": {
+            "privacyStatus": privacy,
+            "selfDeclaredMadeForKids": False,
+        },
+    }
+
+    boundary = "----boundary" + os.urandom(16).hex()
+    body = _build_multipart(metadata, file_path, boundary)
+    api_url = "https://www.googleapis.com/upload/youtube/v3/videos?part=snippet,status"
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": f'multipart/related; boundary="{boundary}"',
+    }
+
+    # --- Send upload request -----------------------------------------------
+
+    try:
+        resp = httpx.post(api_url, headers=headers, content=body, timeout=600)
+    except httpx.RequestError as exc:
+        print(f"[YOUTUBE] Network error: {exc}")
+        return None
+
+    # Retry once on 401 (stale token)
+    if resp.status_code == 401:
+        new_token = _get_valid_token(client_id, client_secret, data_dir)
+        if new_token:
+            headers["Authorization"] = f"Bearer {new_token}"
+            try:
+                resp = httpx.post(api_url, headers=headers, content=body, timeout=600)
+            except httpx.RequestError as exc:
+                print(f"[YOUTUBE] Network error on retry: {exc}")
+                return None
+
+    if resp.status_code == 403:
+        print(f"[YOUTUBE] Quota / permission error: {resp.text}")
+        return None
+
+    if resp.is_error:
+        print(f"[YOUTUBE] HTTP {resp.status_code}: {resp.text}")
+        return None
+
+    # --- Parse response ----------------------------------------------------
+
+    try:
         data = resp.json()
-        if data.get("items"):
-            return data["items"][0]
-        return {}
+    except json.JSONDecodeError:
+        print(f"[YOUTUBE] Invalid JSON in response: {resp.text[:500]}")
+        return None
 
+    video_id = data.get("id")
+    if not video_id:
+        print(f"[YOUTUBE] No video ID in response: {data}")
+        return None
 
-class YouTubeUploader:
-    def __init__(self, auth: YouTubeAuth):
-        self.auth = auth
-        self.api = "https://www.googleapis.com/upload/youtube/v3/videos"
-
-    def publish(self, video_path: str, title: str, description: str = "",
-                tags: list[str] = None, category_id: str = "22") -> Optional[str]:
-        token = self.auth.get_token()
-        if not token:
-            return None
-
-        import os
-        file_size = os.path.getsize(video_path)
-
-        metadata = {
-            "snippet": {
-                "title": title,
-                "description": description,
-                "tags": tags or [],
-                "categoryId": category_id,
-            },
-            "status": {
-                "privacyStatus": "public",
-                "selfDeclaredMadeForKids": False,
-            },
-        }
-
-        boundary = "----boundary" + os.urandom(16).hex()
-        body = self._build_multipart(metadata, video_path, boundary)
-
-        resp = httpx.post(
-            f"{self.api}?part=snippet,status",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": f'multipart/related; boundary="{boundary}"',
-            },
-            content=body,
-            timeout=600,
-        )
-
-        if resp.status_code == 401:
-            new_token = self.auth.get_token()
-            if new_token:
-                resp = httpx.post(
-                    f"{self.api}?part=snippet,status",
-                    headers={
-                        "Authorization": f"Bearer {new_token}",
-                        "Content-Type": f'multipart/related; boundary="{boundary}"',
-                    },
-                    content=body,
-                    timeout=600,
-                )
-        if resp.status_code == 403:
-            print(f"[YOUTUBE] Quota exceeded or permission denied: {resp.text}")
-            return None
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("id")
-
-    def _build_multipart(self, metadata: dict, video_path: str, boundary: str) -> bytes:
-        import json as _json
-        parts = []
-        parts.append(f"--{boundary}\r\n".encode())
-        parts.append(b"Content-Type: application/json; charset=UTF-8\r\n\r\n")
-        parts.append(_json.dumps(metadata).encode())
-        parts.append(b"\r\n")
-        parts.append(f"--{boundary}\r\n".encode())
-        parts.append(b"Content-Type: video/mp4\r\n\r\n")
-        with open(video_path, "rb") as f:
-            parts.append(f.read())
-        parts.append(b"\r\n")
-        parts.append(f"--{boundary}--\r\n".encode())
-        return b"".join(parts)
+    return {
+        "video_id": video_id,
+        "url": f"https://www.youtube.com/watch?v={video_id}",
+    }
