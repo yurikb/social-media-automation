@@ -188,6 +188,8 @@ def cmd_upload(args: argparse.Namespace) -> None:
         platforms.append("youtube")
     if args.platform in ("instagram", "all"):
         platforms.append("instagram")
+    if args.platform in ("tiktok", "all"):
+        platforms.append("tiktok")
 
     results: dict[str, object] = {}
 
@@ -206,6 +208,17 @@ def cmd_upload(args: argparse.Namespace) -> None:
         results["instagram"] = _upload_to_instagram(
             file_path=file_path,
             caption=description or title,
+            env=env,
+            data_dir=data_dir,
+        )
+
+    if "tiktok" in platforms:
+        results["tiktok"] = _upload_to_tiktok(
+            file_path=file_path,
+            title=title,
+            description=description,
+            tags=tags,
+            privacy=privacy,
             env=env,
             data_dir=data_dir,
         )
@@ -316,6 +329,55 @@ def _upload_to_instagram(
         console.print("[red]Instagram upload failed[/]")
 
     return media_id
+
+
+def _upload_to_tiktok(
+    file_path: str,
+    title: str,
+    description: str,
+    tags: list[str],
+    privacy: str,
+    env: dict[str, str],
+    data_dir: str,
+) -> object:
+    """Upload a video to TikTok.  Returns result dict or None on failure."""
+    from src.services.tiktok_upload import upload_video
+
+    client_key = env.get("TIKTOK_CLIENT_KEY") or os.getenv("TIKTOK_CLIENT_KEY", "")
+    client_secret = env.get("TIKTOK_CLIENT_SECRET") or os.getenv("TIKTOK_CLIENT_SECRET", "")
+
+    if not client_key or not client_secret:
+        console.print("[red]TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET must be set in .env[/]")
+        return None
+
+    console.print("[bold]Uploading to TikTok...[/]")
+    console.print(f"  File: {file_path}")
+    console.print(f"  Title: {title}")
+    console.print(f"  Privacy: {privacy}")
+    if tags:
+        console.print(f"  Tags: {', '.join(tags)}")
+    console.print()
+
+    with console.status("[yellow]Uploading to TikTok...[/]"):
+        result = upload_video(
+            file_path=file_path,
+            title=title,
+            description=description,
+            tags=tags,
+            privacy=privacy,
+            client_key=client_key,
+            client_secret=client_secret,
+            data_dir=data_dir,
+        )
+
+    if result:
+        console.print(f"[green]TikTok upload complete![/]")
+        console.print(f"  Video ID: {result['video_id']}")
+        console.print(f"  URL: {result['url']}")
+    else:
+        console.print("[red]TikTok upload failed[/]")
+
+    return result
 
 
 def cmd_auth_login(args: argparse.Namespace) -> None:
@@ -861,7 +923,7 @@ def main() -> None:
     upload_parser.add_argument("--tags", help="Comma-separated tags")
     upload_parser.add_argument("--privacy", choices=["private", "unlisted", "public"], default="private", help="Privacy status (default: private)")
     upload_parser.add_argument("--latest", action="store_true", help="Use most recent file from data/enhanced/")
-    upload_parser.add_argument("--platform", choices=["youtube", "instagram", "all"], default="youtube", help="Target platform(s) for upload (default: youtube)")
+    upload_parser.add_argument("--platform", choices=["youtube", "instagram", "tiktok", "all"], default="youtube", help="Target platform(s) for upload (default: youtube)")
 
     args = parser.parse_args()
 
