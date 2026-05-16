@@ -19,6 +19,48 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
+import webbrowser
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from threading import Event, Thread
+from urllib.parse import urlparse, parse_qs
+
+# ---------------------------------------------------------------------------
+# YouTube OAuth callback server
+# ---------------------------------------------------------------------------
+
+
+class _YouTubeCallbackHandler(BaseHTTPRequestHandler):
+    auth_code: Optional[str] = None
+    event = Event()
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+        code = params.get("code", [None])[0]
+        error = params.get("error", [None])[0]
+        if error:
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"Auth failed.")
+            return
+        if code:
+            self.__class__.auth_code = code
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"You can close this tab.")
+            self.__class__.event.set()
+        else:
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"No code.")
+
+    def log_message(self, *a, **k):
+        pass
+
+
+YOUTUBE_REDIRECT_PORT = 3011
+YOUTUBE_REDIRECT_URI = f"http://localhost:{YOUTUBE_REDIRECT_PORT}"
+
 
 # ---------------------------------------------------------------------------
 # Path discovery
@@ -130,6 +172,62 @@ class YouTubeAuth:
         self.client_id = client_id
         self.client_secret = client_secret
         self.token_file = Path(data_dir) / "youtube_token.json"
+
+    @property
+    def auth_url(self) -> str:
+        scope_str = " ".join(self.SCOPES)
+        return (
+            "https://accounts.google.com/o/oauth2/v2/auth"
+            f"?client_id={self.client_id}"
+            f"&redirect_uri={YOUTUBE_REDIRECT_URI}"
+            f"&response_type=code"
+            f"&scope={scope_str}"
+            f"&access_type=offline"
+        )
+
+    def login(self) -> Optional[str]:
+        _YouTubeCallbackHandler.auth_code = None
+        _YouTubeCallbackHandler.event.clear()
+        server = HTTPServer(("localhost", YOUTUBE_REDIRECT_PORT), _YouTubeCallbackHandler)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        import webbrowser as wb
+        wb.open(self.auth_url)
+        print(f"[YOUTUBE AUTH] Waiting for callback on {YOUTUBE_REDIRECT_URI}...")
+        _YouTubeCallbackHandler.event.wait(timeout=120)
+        server.shutdown()
+
+        code = _YouTubeCallbackHandler.auth_code
+        if not code:
+            return None
+        return self._exchange_code(code)
+
+    def _exchange_code(self, code: str) -> Optional[str]:
+        try:
+            resp = httpx.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "client_id": self.client_id,
+                    "client_secret": self.client_secret,
+                    "code": code,
+                    "redirect_uri": YOUTUBE_REDIRECT_URI,
+                    "grant_type": "authorization_code",
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            token_data: dict[str, Any] = {
+                "access_token": body["access_token"],
+                "refresh_token": body.get("refresh_token", ""),
+                "expires_at": time.time() + body.get("expires_in", 3600),
+            }
+            _save_token(token_data, str(self.token_file.parent))
+            return body["access_token"]
+        except httpx.HTTPError as exc:
+            print(f"[YOUTUBE AUTH] Token exchange failed: {exc}")
+            return None
 
     def get_token(self) -> Optional[str]:
         return _get_valid_token(self.client_id, self.client_secret, str(self.token_file.parent))

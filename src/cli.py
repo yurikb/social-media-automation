@@ -459,6 +459,22 @@ def _auth_status_instagram(env: dict, data_dir: str) -> None:
         console.print("[red]  Instagram: Not authenticated (sma auth instagram)[/]")
 
 
+def _auth_status_tiktok(env: dict, data_dir: str) -> None:
+    ck = env.get("TIKTOK_CLIENT_KEY") or os.getenv("TIKTOK_CLIENT_KEY", "")
+    if not ck:
+        return
+    from src.services.tiktok_upload import TikTokAuth
+    auth = TikTokAuth(
+        client_key=ck,
+        client_secret=env.get("TIKTOK_CLIENT_SECRET") or os.getenv("TIKTOK_CLIENT_SECRET", ""),
+        data_dir=data_dir,
+    )
+    if auth.is_authenticated():
+        console.print("[green]  TikTok: Authenticated[/]")
+    else:
+        console.print("[red]  TikTok: Not authenticated (sma auth tiktok)[/]")
+
+
 def cmd_auth_status(args: argparse.Namespace) -> None:
     env = load_env(args.env)
     data_dir = _get_data_dir(args)
@@ -466,6 +482,7 @@ def cmd_auth_status(args: argparse.Namespace) -> None:
     _auth_status_twitch(env, data_dir)
     _auth_status_youtube(env, data_dir)
     _auth_status_instagram(env, data_dir)
+    _auth_status_tiktok(env, data_dir)
 
 
 def cmd_auth_test(args: argparse.Namespace) -> None:
@@ -719,6 +736,42 @@ def cmd_auth_instagram(args: argparse.Namespace) -> None:
         console.print(f"[red]Instagram auth failed: {e}[/]")
 
 
+def cmd_auth_tiktok(args: argparse.Namespace) -> None:
+    env = load_env(args.env)
+    client_key = env.get("TIKTOK_CLIENT_KEY") or os.getenv("TIKTOK_CLIENT_KEY", "")
+    client_secret = env.get("TIKTOK_CLIENT_SECRET") or os.getenv("TIKTOK_CLIENT_SECRET", "")
+    if not client_key or not client_secret:
+        console.print("[red]TIKTOK_CLIENT_KEY and TIKTOK_CLIENT_SECRET must be set in .env[/]")
+        console.print("[yellow]1. Go to https://developers.tiktok.com/[/]")
+        console.print("[yellow]2. Create an app[/]")
+        console.print("[yellow]3. Add http://localhost:3013 as Redirect URI[/]")
+        console.print("[yellow]4. Enable video.upload and user.info.basic scopes[/]")
+        return
+
+    data_dir = _get_data_dir(args)
+    from src.services.tiktok_upload import TikTokAuth
+    auth = TikTokAuth(
+        client_key=client_key,
+        client_secret=client_secret,
+        data_dir=data_dir,
+    )
+
+    if auth.is_authenticated():
+        console.print("[green]TikTok já autenticado![/]")
+        return
+
+    console.print("[yellow]Abrindo navegador pra autorizar TikTok...[/]")
+    console.print("[dim]Redirect URI: http://localhost:3013[/]")
+    try:
+        token = auth.login()
+        if token:
+            console.print(f"[green]TikTok authenticated! Token salvo em {auth.token_file}[/]")
+        else:
+            console.print("[red]Falha na autenticação do TikTok[/]")
+    except Exception as e:
+        console.print(f"[red]TikTok auth failed: {e}[/]")
+
+
 def cmd_preview(args: argparse.Namespace) -> None:
     pipeline = _create_pipeline(args)
     review = ReviewService(data_dir=_get_data_dir(args))
@@ -901,13 +954,14 @@ def main() -> None:
 
     sub.add_parser("score", help="Test scoring with sample data")
 
-    auth_parser = sub.add_parser("auth", help="Authentication commands (Twitch, YouTube, Instagram)")
+    auth_parser = sub.add_parser("auth", help="Authentication commands (Twitch, YouTube, Instagram, TikTok)")
     auth_sub = auth_parser.add_subparsers(dest="auth_command", help="Auth commands")
     auth_sub.add_parser("login", help="Authorize with Twitch (opens browser)")
     auth_sub.add_parser("status", help="Check auth status")
     auth_sub.add_parser("test", help="Test clip creation with live streamers")
     auth_sub.add_parser("youtube", help="Authorize YouTube uploads (opens browser)")
     auth_sub.add_parser("instagram", help="Authorize Instagram uploads (opens browser)")
+    auth_sub.add_parser("tiktok", help="Authorize TikTok uploads (opens browser)")
 
     health_parser = sub.add_parser("health", help="Run health checks")
     health_parser.add_argument("--json", action="store_true", help="Output machine-readable JSON")
@@ -938,8 +992,10 @@ def main() -> None:
             cmd_auth_youtube(args)
         elif args.auth_command == "instagram":
             cmd_auth_instagram(args)
+        elif args.auth_command == "tiktok":
+            cmd_auth_tiktok(args)
         else:
-            print("Usage: sma auth {login|status|test|youtube|instagram}")
+            print("Usage: sma auth {login|status|test|youtube|instagram|tiktok}")
         return
 
     if args.command == "scan":

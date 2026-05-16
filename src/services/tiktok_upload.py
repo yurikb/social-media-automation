@@ -19,6 +19,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
+import webbrowser
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from threading import Event, Thread
+from urllib.parse import urlparse, parse_qs
 
 # ---------------------------------------------------------------------------
 # Path discovery
@@ -450,3 +454,115 @@ def upload_video(
         "video_id": video_id,
         "url": f"https://www.tiktok.com/video/{video_id}",
     }
+
+
+# ---------------------------------------------------------------------------
+# TikTokAuth  — used by cli.py for authentication command
+# ---------------------------------------------------------------------------
+
+
+class _TikTokCallbackHandler(BaseHTTPRequestHandler):
+    auth_code: Optional[str] = None
+    event = Event()
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+        code = params.get("code", [None])[0]
+        error = params.get("error", [None])[0]
+        if error:
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"Auth failed.")
+            return
+        if code:
+            self.__class__.auth_code = code
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"You can close this tab.")
+            self.__class__.event.set()
+        else:
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"No code.")
+
+    def log_message(self, *a, **k):
+        pass
+
+
+TIKTOK_REDIRECT_PORT = 3013
+TIKTOK_REDIRECT_URI = f"http://localhost:{TIKTOK_REDIRECT_PORT}"
+
+
+class TikTokAuth:
+    """TikTok OAuth2 authentication."""
+
+    SCOPES = [
+        "user.info.basic",
+        "video.upload",
+    ]
+
+    def __init__(self, client_key: str, client_secret: str, data_dir: str) -> None:
+        self.client_key = client_key
+        self.client_secret = client_secret
+        self.token_file = Path(data_dir) / "tiktok_token.json"
+
+    @property
+    def auth_url(self) -> str:
+        scope_str = ",".join(self.SCOPES)
+        return (
+            "https://www.tiktok.com/v2/auth/authorize/"
+            f"?client_key={self.client_key}"
+            f"&redirect_uri={TIKTOK_REDIRECT_URI}"
+            f"&response_type=code"
+            f"&scope={scope_str}"
+        )
+
+    def login(self) -> Optional[str]:
+        _TikTokCallbackHandler.auth_code = None
+        _TikTokCallbackHandler.event.clear()
+        server = HTTPServer(("localhost", TIKTOK_REDIRECT_PORT), _TikTokCallbackHandler)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        webbrowser.open(self.auth_url)
+        print(f"[TIKTOK AUTH] Waiting for callback on {TIKTOK_REDIRECT_URI}...")
+        _TikTokCallbackHandler.event.wait(timeout=120)
+        server.shutdown()
+
+        code = _TikTokCallbackHandler.auth_code
+        if not code:
+            return None
+        return self._exchange_code(code)
+
+    def _exchange_code(self, code: str) -> Optional[str]:
+        try:
+            resp = httpx.post(
+                f"{_TIKTOK_API_BASE}/oauth/token/",
+                data={
+                    "client_key": self.client_key,
+                    "client_secret": self.client_secret,
+                    "code": code,
+                    "redirect_uri": TIKTOK_REDIRECT_URI,
+                    "grant_type": "authorization_code",
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            body = resp.json()
+            token_data: dict[str, Any] = {
+                "access_token": body["access_token"],
+                "refresh_token": body.get("refresh_token", ""),
+                "expires_at": time.time() + body.get("expires_in", 86400),
+            }
+            _save_token(token_data, str(self.token_file.parent))
+            return body["access_token"]
+        except httpx.HTTPError as exc:
+            print(f"[TIKTOK AUTH] Token exchange failed: {exc}")
+            return None
+
+    def get_token(self) -> Optional[str]:
+        return _get_valid_token(self.client_key, self.client_secret, str(self.token_file.parent))
+
+    def is_authenticated(self) -> bool:
+        return self.get_token() is not None
