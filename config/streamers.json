@@ -1,0 +1,38 @@
+{
+  "streamers": [
+    {
+      "name": "alanzoka",
+      "platform": "twitch",
+      "channel_id": "alanzoka",
+      "priority": 1,
+      "categories": ["gaming", "variety"]
+    },
+    {
+      "name": "cellbit",
+      "platform": "twitch",
+      "channel_id": "cellbit",
+      "priority": 1,
+      "categories": ["gaming", "rp"]
+    },
+    {
+      "name": "felps",
+      "platform": "twitch",
+      "channel_id": "felps",
+      "priority": 2,
+      "categories": ["gaming", "variety"]
+    },
+    {
+      "name": "brino",
+      "platform": "twitch",
+      "channel_id": "brinoplay",
+      "priority": 2,
+      "categories": ["gaming", "comedy"]
+    }
+  ],
+  "monitoring": {
+    "check_interval_seconds": 60,
+    "min_clip_duration_seconds": 15,
+    "max_clip_duration_seconds": 90,
+    "peak_hours": [18, 19, 20, 21, 22, 23, 0, 1]
+  }
+}

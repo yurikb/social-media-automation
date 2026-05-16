@@ -1,0 +1,43 @@
+{
+  "platforms": {
+    "tiktok": {
+      "enabled": true,
+      "max_duration_seconds": 180,
+      "optimal_duration_seconds": 30,
+      "aspect_ratio": "9:16",
+      "resolution": "1080x1920",
+      "posting_schedule": {
+        "timezone": "America/Sao_Paulo",
+        "optimal_hours": [12, 18, 20, 21]
+      }
+    },
+    "youtube_shorts": {
+      "enabled": true,
+      "max_duration_seconds": 60,
+      "optimal_duration_seconds": 45,
+      "aspect_ratio": "9:16",
+      "resolution": "1080x1920"
+    },
+    "instagram_reels": {
+      "enabled": false,
+      "max_duration_seconds": 90,
+      "optimal_duration_seconds": 60,
+      "aspect_ratio": "9:16",
+      "resolution": "1080x1920"
+    },
+    "x": {
+      "enabled": false,
+      "max_duration_seconds": 140,
+      "optimal_duration_seconds": 45,
+      "aspect_ratio": "16:9 or 9:16",
+      "resolution": "1280x720 or 1080x1920"
+    },
+    "threads": {
+      "enabled": false,
+      "max_duration_seconds": 300,
+      "optimal_duration_seconds": 60,
+      "aspect_ratio": "9:16",
+      "resolution": "1080x1920"
+    }
+  }
+}

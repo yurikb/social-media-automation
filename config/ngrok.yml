@@ -1,0 +1,8 @@
+version: "3"
+authtoken: 3BYDWJmqVZemL9HU5sTAlYM2x2P_YUvYsKxLr5EsVtnZQ5qG
+web_addr: 127.0.0.1:4040
+tunnels:
+  legal-suite:
+    proto: http
+    addr: 8000
+    inspect: false

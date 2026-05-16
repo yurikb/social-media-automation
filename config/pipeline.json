@@ -1,0 +1,22 @@
+{
+  "pipeline": {
+    "phases": ["research", "curate", "clip", "enhance", "publish", "analytics"],
+    "max_concurrent_clips": 3,
+    "retry_attempts": 3,
+    "retry_delay_seconds": 30,
+    "clip_retention_days": 7,
+    "analytics_refresh_minutes": 60
+  },
+  "enhancement": {
+    "caption_style": "karaoke",
+    "caption_language": "pt-BR",
+    "thumbnail_options_per_clip": 3,
+    "hook_overlay_duration_ms": 1500
+  },
+  "publishing": {
+    "auto_publish": false,
+    "require_approval": true,
+    "batch_size": 5,
+    "cooldown_between_posts_minutes": 15
+  }
+}
