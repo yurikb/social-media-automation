@@ -1,0 +1,8 @@
+{
+  "upload": {
+    "default_privacy": "private",
+    "default_tags": ["clip", "gaming", "shorts", "highlight"],
+    "default_category_id": "22",
+    "default_description": "Automatically clipped and uploaded by SMA."
+  }
+}

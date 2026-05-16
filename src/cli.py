@@ -138,6 +138,86 @@ def cmd_list_streamers(args: argparse.Namespace) -> None:
     console.print(table)
 
 
+def cmd_upload(args: argparse.Namespace) -> None:
+    """Upload a video to YouTube."""
+    from src.services.youtube_upload import upload_video
+
+    env = load_env(args.env)
+    data_dir = _get_data_dir(args)
+    client_id = env.get("YOUTUBE_CLIENT_ID") or os.getenv("YOUTUBE_CLIENT_ID", "")
+    client_secret = env.get("YOUTUBE_CLIENT_SECRET") or os.getenv("YOUTUBE_CLIENT_SECRET", "")
+
+    if not client_id or not client_secret:
+        console.print("[red]YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET must be set in .env[/]")
+        return
+
+    # Determine file path
+    file_path = args.file
+    if args.latest:
+        import glob
+        video_dir = os.path.join(data_dir, "enhanced")
+        mp4_files = sorted(glob.glob(os.path.join(video_dir, "*.mp4")), key=os.path.getmtime, reverse=True)
+        if not mp4_files:
+            console.print("[red]No MP4 files found in data/enhanced/[/]")
+            return
+        file_path = mp4_files[0]
+        console.print(f"[dim]Using latest video: {file_path}[/]")
+
+    if not file_path or not os.path.exists(file_path):
+        console.print(f"[red]File not found: {file_path or '(none)'}[/]")
+        return
+
+    # Load upload config
+    config_path = os.path.join(Path(args.config).resolve(), "youtube_upload.json")
+    upload_config = {}
+    if os.path.exists(config_path):
+        try:
+            upload_config = json.loads(Path(config_path).read_text()).get("upload", {})
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Auto-generate title from filename if not provided
+    title = args.title
+    if not title:
+        title = Path(file_path).stem.replace("_", " ").replace("-", " ").title()
+        console.print(f"[dim]Auto-generated title: {title}[/]")
+
+    description = args.description or upload_config.get("default_description", "")
+    tags: list[str] = []
+    if args.tags:
+        tags = [t.strip() for t in args.tags.split(",") if t.strip()]
+    else:
+        tags = upload_config.get("default_tags", [])
+    privacy = args.privacy or upload_config.get("default_privacy", "private")
+
+    console.print("[bold]Uploading to YouTube...[/]")
+    console.print(f"  File: {file_path}")
+    console.print(f"  Title: {title}")
+    console.print(f"  Privacy: {privacy}")
+    if tags:
+        console.print(f"  Tags: {', '.join(tags)}")
+    console.print()
+
+    with console.status("[yellow]Uploading...[/]"):
+        result = upload_video(
+            file_path=file_path,
+            title=title,
+            description=description,
+            tags=tags,
+            privacy=privacy,
+            client_id=client_id,
+            client_secret=client_secret,
+            data_dir=data_dir,
+        )
+
+    if result:
+        console.print(f"[green]Upload complete![/]")
+        console.print(f"  Video ID: {result['video_id']}")
+        console.print(f"  URL: {result['url']}")
+    else:
+        console.print("[red]Upload failed[/]")
+
+
 def cmd_auth_login(args: argparse.Namespace) -> None:
     env = load_env(args.env)
     client_id = env.get("TWITCH_CLIENT_ID") or os.getenv("TWITCH_CLIENT_ID", "")
@@ -674,6 +754,14 @@ def main() -> None:
     schedule_parser.add_argument("--interval", type=int, default=60, help="Interval in minutes between runs (default: 60)")
     schedule_parser.add_argument("--dry-run", action="store_true", help="Process without actual publishing")
 
+    upload_parser = sub.add_parser("upload", help="Upload a video to YouTube")
+    upload_parser.add_argument("file", nargs="?", help="Path to video file")
+    upload_parser.add_argument("--title", help="Video title (auto-generated from filename if omitted)")
+    upload_parser.add_argument("--description", help="Video description")
+    upload_parser.add_argument("--tags", help="Comma-separated tags")
+    upload_parser.add_argument("--privacy", choices=["private", "unlisted", "public"], default="private", help="Privacy status (default: private)")
+    upload_parser.add_argument("--latest", action="store_true", help="Use most recent file from data/enhanced/")
+
     args = parser.parse_args()
 
     if args.command == "auth":
@@ -714,6 +802,8 @@ def main() -> None:
         cmd_health(args)
     elif args.command == "schedule":
         cmd_schedule(args)
+    elif args.command == "upload":
+        cmd_upload(args)
     else:
         parser.print_help()
 
